@@ -5,6 +5,24 @@ calls. Think password managers, a terminal with secrets on screen, or a tab full
 of API keys. The window stays perfectly visible to you on your monitor, but it
 shows up blank to anything trying to capture the screen.
 
+## See it in action
+
+Here is a short recording of Cloak hiding and showing a window live in a screen
+capture. It plays inline on GitHub, and the local preview uses the player below.
+
+https://github.com/Shaku-Med/hide-window/raw/main/assets/video/demo.mp4
+
+<video src="assets/video/demo.mp4" controls width="720"></video>
+
+Without Cloak, the window is fully visible to whatever is capturing the screen:
+
+![A normal screen capture with the window fully visible](assets/screenshots/before.png)
+
+With Cloak hiding that window, the same capture shows nothing where it used to
+be, while you still see it normally on your own monitor:
+
+![The same capture with the window hidden by Cloak](assets/screenshots/after_github_window_hidden.png)
+
 ## How the hiding actually works
 
 Windows has a function called `SetWindowDisplayAffinity`. Set the flag
