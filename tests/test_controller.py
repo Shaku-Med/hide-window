@@ -7,6 +7,7 @@ from screen_guard.model import WindowInfo
 
 class FakeBackend(Backend):
     can_hide_other_apps = True
+    supports_keep_active = True
 
     def __init__(self, hide_ok=True, show_ok=True):
         self.hide_ok = hide_ok
@@ -14,6 +15,10 @@ class FakeBackend(Backend):
         self.hide_calls = []
         self.show_calls = []
         self.unprotect_calls = 0
+        self.shield_calls = []
+        self.shield_clears = 0
+        self.windows = set()
+        self.shielded = None
 
     def hide(self, win_id):
         self.hide_calls.append(win_id)
@@ -25,6 +30,18 @@ class FakeBackend(Backend):
 
     def unprotect_self(self):
         self.unprotect_calls += 1
+
+    def is_window(self, win_id):
+        return win_id in self.windows if self.windows else True
+
+    def ensure_focus_shield(self, win_id):
+        self.shield_calls.append(win_id)
+        self.shielded = win_id
+        return True
+
+    def clear_focus_shield(self):
+        self.shield_clears += 1
+        self.shielded = None
 
 
 def window(win_id, title="window", app="app"):
@@ -139,11 +156,62 @@ class HousekeepingTests(unittest.TestCase):
         guard.pinned = {1}
         guard.hidden = {1}
         guard.fail_count = {1: 2}
+        guard.keep_active = 1
         guard.unhide_all([window(1), window(2)])
         self.assertEqual(guard.pinned, set())
         self.assertEqual(guard.hidden, set())
         self.assertEqual(guard.fail_count, {})
+        self.assertIsNone(guard.keep_active)
         self.assertEqual(sorted(backend.show_calls), [1, 2])
+
+
+class KeepActiveTests(unittest.TestCase):
+    def test_toggle_keep_active(self):
+        backend = FakeBackend()
+        guard = Guard(backend)
+        guard.toggle_keep_active(4)
+        self.assertEqual(guard.keep_active, 4)
+        self.assertEqual(backend.shield_calls, [4])
+        guard.toggle_keep_active(4)
+        self.assertIsNone(guard.keep_active)
+        self.assertGreaterEqual(backend.shield_clears, 1)
+
+    def test_toggle_switches_target(self):
+        backend = FakeBackend()
+        guard = Guard(backend)
+        guard.toggle_keep_active(1)
+        guard.toggle_keep_active(2)
+        self.assertEqual(guard.keep_active, 2)
+        self.assertEqual(backend.shielded, 2)
+
+    def test_sync_clears_dead_keep_active(self):
+        backend = FakeBackend()
+        guard = Guard(backend)
+        guard.keep_active = 9
+        guard.sync(live={1, 2})
+        self.assertIsNone(guard.keep_active)
+        self.assertGreaterEqual(backend.shield_clears, 1)
+
+    def test_tick_focus_installs_shield_without_stealing_focus(self):
+        backend = FakeBackend()
+        backend.windows = {5}
+        guard = Guard(backend)
+        guard.keep_active = 5
+        guard.tick_focus()
+        self.assertEqual(backend.shield_calls, [5])
+        self.assertEqual(backend.shielded, 5)
+        self.assertTrue(guard.keep_active_ok)
+
+    def test_clear_keep_active_removes_shield(self):
+        backend = FakeBackend()
+        guard = Guard(backend)
+        guard.toggle_keep_active(1)
+        self.assertTrue(guard.keep_active_ok)
+        guard.clear_keep_active()
+        self.assertIsNone(guard.keep_active)
+        self.assertFalse(guard.keep_active_ok)
+        self.assertIsNone(backend.shielded)
+        self.assertGreaterEqual(backend.shield_clears, 1)
 
 
 if __name__ == "__main__":

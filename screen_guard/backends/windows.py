@@ -9,6 +9,7 @@ from typing import Callable
 from ..about import APP_NAME
 from ..assets import logo_ico
 from ..model import WindowInfo
+from . import focus_shield
 from .base import Backend
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -86,10 +87,12 @@ def _bind():
     user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetForegroundWindow.restype = wintypes.HWND
     user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.DefWindowProcW.restype = LRESULT
     user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASS)]
@@ -110,6 +113,7 @@ def _bind():
     user32.TrackPopupMenu.restype = ctypes.c_int
     user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.DestroyMenu.argtypes = [wintypes.HMENU]
     user32.DestroyWindow.argtypes = [wintypes.HWND]
@@ -133,6 +137,7 @@ def _bind():
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.GetExitCodeThread.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
     kernel32.IsWow64Process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
 
     shell32.IsUserAnAdmin.restype = wintypes.BOOL
     shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
@@ -225,13 +230,56 @@ def _inject_affinity(hwnd: int, affinity: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def _enable_debug_privilege() -> None:
+    """Admin tokens often have SeDebugPrivilege disabled until requested."""
+    TOKEN_ADJUST_PRIVILEGES = 0x0020
+    TOKEN_QUERY = 0x0008
+    SE_PRIVILEGE_ENABLED = 0x00000002
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class LUID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+    class TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID)]
+    advapi32.AdjustTokenPrivileges.argtypes = [
+        wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(TOKEN_PRIVILEGES),
+        wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID,
+    ]
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(token)
+    ):
+        return
+    try:
+        luid = LUID()
+        if not advapi32.LookupPrivilegeValueW(None, "SeDebugPrivilege", ctypes.byref(luid)):
+            return
+        tp = TOKEN_PRIVILEGES()
+        tp.PrivilegeCount = 1
+        tp.Privileges[0].Luid = luid
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+        advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(tp), 0, None, None)
+    finally:
+        kernel32.CloseHandle(token)
+
+
 class WindowsBackend(Backend):
     name = "windows"
     can_hide_other_apps = True
+    supports_keep_active = True
 
     def __init__(self):
         self._own_hwnd = None
         self._tray = None
+        self._shield = None
+        self._shield_was_background = False
 
     def ensure_privileges(self) -> bool:
         try:
@@ -239,6 +287,10 @@ class WindowsBackend(Backend):
         except Exception:
             is_admin = False
         if is_admin:
+            try:
+                _enable_debug_privilege()
+            except Exception:
+                pass
             return True
         shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
         return False
@@ -270,6 +322,44 @@ class WindowsBackend(Backend):
     def show(self, window_id: int) -> bool:
         return _inject_affinity(window_id, WDA_NONE)
 
+    def is_window(self, window_id: int) -> bool:
+        return bool(user32.IsWindow(window_id))
+
+    def get_foreground(self) -> int | None:
+        hwnd = user32.GetForegroundWindow()
+        return int(hwnd) if hwnd else None
+
+    def ensure_focus_shield(self, window_id: int) -> bool:
+        if self._shield and self._shield.hwnd == window_id and focus_shield.is_alive(self._shield):
+            focus_shield.sync_children(self._shield)
+            fg = self.get_foreground()
+            in_foreground = fg is not None and (fg == window_id or fg == self._own_hwnd)
+            if in_foreground:
+                # User came back — pulse real focus so the page is not stuck AWAY.
+                if self._shield_was_background:
+                    focus_shield.resync_real_focus(self._shield)
+                self._shield_was_background = False
+            else:
+                # Still elsewhere — keep the page believing it is focused.
+                focus_shield.reinforce(self._shield)
+                self._shield_was_background = True
+            return True
+        if self._shield:
+            focus_shield.remove(self._shield)
+            self._shield = None
+        state = focus_shield.install(window_id)
+        if not state:
+            return False
+        self._shield = state
+        self._shield_was_background = False
+        return True
+
+    def clear_focus_shield(self) -> None:
+        if self._shield:
+            focus_shield.remove(self._shield)
+            self._shield = None
+        self._shield_was_background = False
+
     def protect_self(self, tk_root) -> bool:
         try:
             tk_root.update_idletasks()
@@ -281,6 +371,7 @@ class WindowsBackend(Backend):
             return False
 
     def unprotect_self(self) -> None:
+        self.clear_focus_shield()
         if self._own_hwnd:
             try:
                 user32.SetWindowDisplayAffinity(self._own_hwnd, WDA_NONE)

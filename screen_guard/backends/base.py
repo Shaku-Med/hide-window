@@ -30,7 +30,22 @@ class Backend:
     def unprotect_self(self) -> None:
         pass
 
+    def is_window(self, window_id: int) -> bool:
+        return False
+
+    def get_foreground(self) -> int | None:
+        return None
+
+    def ensure_focus_shield(self, window_id: int) -> bool:
+        """Make window_id keep believing it is active while another window has real focus."""
+        return False
+
+    def clear_focus_shield(self) -> None:
+        """Remove any installed focus shield."""
+        pass
+
     supports_tray = False
+    supports_keep_active = False
 
     def setup_tray(self, on_restore: Callable[[], None], on_quit: Callable[[], None]) -> None:
         pass

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Focus Probe — leave detection</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a222c;
+      --line: #2a3542;
+      --fg: #e7eef6;
+      --muted: #8b9aab;
+      --ok: #3dd68c;
+      --bad: #ff6b6b;
+      --warn: #f0c14a;
+      --accent: #5b9fd4;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      min-height: 100vh;
+    }
+    header {
+      padding: 20px 24px 12px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #15202b, var(--bg));
+    }
+    h1 { margin: 0 0 6px; font-size: 22px; font-weight: 650; }
+    .sub { color: var(--muted); max-width: 720px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      padding: 16px 24px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .big {
+      font-size: 28px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .big.ok { color: var(--ok); }
+    .big.bad { color: var(--bad); }
+    .big.warn { color: var(--warn); }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 4px 0;
+      border-bottom: 1px solid transparent;
+    }
+    .row span:first-child { color: var(--muted); }
+    .row code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+    .banner {
+      margin: 0 24px 8px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #132033;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .banner.away {
+      background: #2a1418;
+      border-color: #5a2430;
+      color: var(--bad);
+    }
+    .log-wrap { padding: 8px 24px 28px; }
+    .log-tools { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+    button {
+      background: #243041;
+      color: var(--fg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    #log {
+      height: 360px;
+      overflow: auto;
+      background: #0b1015;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: 12px/1.4 ui-monospace, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+    .ev-ok { color: var(--ok); }
+    .ev-bad { color: var(--bad); }
+    .ev-info { color: var(--accent); }
+    .ev-warn { color: var(--warn); }
+    .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Focus Probe</h1>
+    <p class="sub">
+      This page listens for every common signal that you left the tab or window:
+      blur/focus, Page Visibility, hasFocus polling, timer throttling, Page Lifecycle,
+      and more. Leave this tab open, then switch away (or use Cloak keep-active) and
+      watch what flips.
+    </p>
+  </header>
+
+  <div id="banner" class="banner">PRESENT — page believes you are here</div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Live verdict</h2>
+      <div id="verdict" class="big ok">HERE</div>
+      <div class="row"><span>Reason</span><code id="reason">starting</code></div>
+      <div class="row"><span>Away events</span><code id="awayCount">0</code></div>
+      <div class="row"><span>Return events</span><code id="backCount">0</code></div>
+    </div>
+    <div class="card">
+      <h2>Focus APIs</h2>
+      <div class="row"><span>document.hasFocus()</span><code id="hasFocus">—</code></div>
+      <div class="row"><span>document.activeElement</span><code id="activeEl">—</code></div>
+      <div class="row"><span>window focused</span><code id="winFocused">—</code></div>
+      <div class="row"><span>last focus event</span><code id="lastFocus">—</code></div>
+    </div>
+    <div class="card">
+      <h2>Visibility APIs</h2>
+      <div class="row"><span>document.hidden</span><code id="hidden">—</code></div>
+      <div class="row"><span>visibilityState</span><code id="visState">—</code></div>
+      <div class="row"><span>wasDiscarded</span><code id="wasDiscarded">—</code></div>
+      <div class="row"><span>prerendering</span><code id="prerendering">—</code></div>
+    </div>
+    <div class="card">
+      <h2>Timers / throttle</h2>
+      <div class="row"><span>setInterval drift</span><code id="intervalDrift">—</code></div>
+      <div class="row"><span>rAF FPS</span><code id="rafFps">—</code></div>
+      <div class="row"><span>AudioContext</span><code id="audioState">—</code></div>
+      <div class="row"><span>userActivation</span><code id="userAct">—</code></div>
+    </div>
+  </div>
+
+  <div class="log-wrap">
+    <div class="log-tools">
+      <button type="button" id="clearBtn">Clear log</button>
+      <button type="button" id="copyBtn">Copy log</button>
+      <button type="button" id="beepBtn">Unlock audio probe</button>
+      <span class="hint">Green = still present · Red = detected leave</span>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  let awayCount = 0;
+  let backCount = 0;
+  let windowFocused = document.hasFocus();
+  let lastFocusLabel = "none yet";
+  let audioCtx = null;
+  let lastInterval = performance.now();
+  let rafFrames = 0;
+  let rafLast = performance.now();
+  let wasAway = false;
+
+  function stamp() {
+    const d = new Date();
+    return d.toLocaleTimeString([], { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  }
+
+  function log(kind, msg) {
+    const line = document.createElement("div");
+    line.className = "ev-" + kind;
+    line.textContent = `[${stamp()}] ${msg}`;
+    logEl.prepend(line);
+  }
+
+  function activeName() {
+    const el = document.activeElement;
+    if (!el || el === document.body) return "body";
+    return (el.tagName || "?").toLowerCase() + (el.id ? "#" + el.id : "");
+  }
+
+  function readUserActivation() {
+    const ua = navigator.userActivation;
+    if (!ua) return "unsupported";
+    return `active=${ua.isActive} hasBeen=${ua.hasBeenActive}`;
+  }
+
+  function computeAway() {
+    // Keep windowFocused in sync with the browser — sticky blur flags lie after
+    // in-page focus moves (e.g. clicking Unlock audio) or Cloak keep-active.
+    windowFocused = document.hasFocus();
+    const reasons = [];
+    if (document.hidden) reasons.push("document.hidden");
+    if (document.visibilityState && document.visibilityState !== "visible") {
+      reasons.push("visibilityState=" + document.visibilityState);
+    }
+    if (!document.hasFocus()) reasons.push("!document.hasFocus()");
+    return reasons;
+  }
+
+  function paint() {
+    const reasons = computeAway();
+    const away = reasons.length > 0;
+    $("hasFocus").textContent = String(document.hasFocus());
+    $("activeEl").textContent = activeName();
+    $("winFocused").textContent = String(windowFocused);
+    $("lastFocus").textContent = lastFocusLabel;
+    $("hidden").textContent = String(document.hidden);
+    $("visState").textContent = String(document.visibilityState);
+    $("wasDiscarded").textContent = String(document.wasDiscarded ?? "n/a");
+    $("prerendering").textContent = String(document.prerendering ?? "n/a");
+    $("userAct").textContent = readUserActivation();
+    $("audioState").textContent = audioCtx ? audioCtx.state : "locked (click Unlock)";
+    $("awayCount").textContent = String(awayCount);
+    $("backCount").textContent = String(backCount);
+
+    const verdict = $("verdict");
+    const banner = $("banner");
+    const reason = $("reason");
+    if (away) {
+      verdict.textContent = "AWAY";
+      verdict.className = "big bad";
+      banner.textContent = "AWAY — page detected that you left";
+      banner.className = "banner away";
+      reason.textContent = reasons.join(" + ");
+      if (!wasAway) {
+        awayCount += 1;
+        $("awayCount").textContent = String(awayCount);
+        log("bad", "LEFT detected via: " + reasons.join(", "));
+      }
+    } else {
+      verdict.textContent = "HERE";
+      verdict.className = "big ok";
+      banner.textContent = "PRESENT — page believes you are here";
+      banner.className = "banner";
+      reason.textContent = "hasFocus + visible";
+      if (wasAway) {
+        backCount += 1;
+        $("backCount").textContent = String(backCount);
+        log("ok", "RETURNED — all leave signals clear");
+      }
+    }
+    wasAway = away;
+  }
+
+  function onWindowFocusish(name, isFocus) {
+    // Only window-level focus/blur mean you left the app. document focusin/out
+    // fire when clicking buttons (Unlock audio) and must not mark AWAY.
+    windowFocused = isFocus;
+    lastFocusLabel = name;
+    log(isFocus ? "ok" : "bad", name);
+    paint();
+  }
+
+  window.addEventListener("focus", () => onWindowFocusish("window.focus", true));
+  window.addEventListener("blur", () => onWindowFocusish("window.blur", false));
+  // Log bubbling focus moves for debugging, but do not drive the verdict.
+  ["focusin", "focusout"].forEach((type) => {
+    document.addEventListener(type, (e) => {
+      if (e.target === document || e.target === document.body) return;
+      log("info", "document." + type + " → " + activeName());
+    });
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    log(document.hidden ? "bad" : "ok",
+      `visibilitychange → hidden=${document.hidden} state=${document.visibilityState}`);
+    paint();
+  });
+
+  window.addEventListener("pagehide", (e) => {
+    log("bad", `pagehide persisted=${e.persisted}`);
+    paint();
+  });
+  window.addEventListener("pageshow", (e) => {
+    log("ok", `pageshow persisted=${e.persisted}`);
+    paint();
+  });
+  window.addEventListener("freeze", () => log("warn", "freeze (Page Lifecycle)"));
+  window.addEventListener("resume", () => log("ok", "resume (Page Lifecycle)"));
+  window.addEventListener("beforeunload", () => log("warn", "beforeunload"));
+  window.addEventListener("unload", () => log("warn", "unload"));
+
+  document.addEventListener("mouseleave", () => log("info", "document mouseleave"));
+  document.addEventListener("mouseenter", () => log("info", "document mouseenter"));
+  window.addEventListener("mouseout", (e) => {
+    if (!e.relatedTarget && !e.toElement) log("info", "window mouseout (left chrome?)");
+  });
+
+  window.addEventListener("offline", () => log("warn", "navigator offline"));
+  window.addEventListener("online", () => log("info", "navigator online"));
+  document.addEventListener("fullscreenchange", () => {
+    log("info", "fullscreen=" + !!document.fullscreenElement);
+  });
+  document.addEventListener("pointerlockchange", () => {
+    log("info", "pointerLock=" + !!document.pointerLockElement);
+  });
+
+  if ("onprecache" in document || "prerenderingchange" in document) {
+    document.addEventListener("prerenderingchange", () => {
+      log("info", "prerenderingchange → " + document.prerendering);
+    });
+  }
+
+  // hasFocus / activation polling — catches silent focus loss
+  setInterval(() => {
+    paint();
+  }, 100);
+
+  // Background timer clamping detector
+  setInterval(() => {
+    const now = performance.now();
+    const drift = Math.round(now - lastInterval - 250);
+    lastInterval = now;
+    $("intervalDrift").textContent = (drift >= 0 ? "+" : "") + drift + "ms";
+    if (drift > 200) {
+      log("warn", `setInterval heavily throttled (drift ${drift}ms) — often means backgrounded`);
+    }
+  }, 250);
+
+  // rAF FPS — drops hard when tab is hidden
+  function rafLoop(ts) {
+    rafFrames += 1;
+    if (ts - rafLast >= 1000) {
+      $("rafFps").textContent = rafFrames + " fps";
+      if (rafFrames < 10 && !document.hidden) {
+        log("warn", `rAF only ${rafFrames} fps while visibilityState=visible`);
+      }
+      rafFrames = 0;
+      rafLast = ts;
+    }
+    requestAnimationFrame(rafLoop);
+  }
+  requestAnimationFrame(rafLoop);
+
+  // Optional AudioContext state probe (often suspends when away)
+  $("beepBtn").addEventListener("click", async () => {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      await audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.05);
+      log("info", "AudioContext unlocked, state=" + audioCtx.state);
+      audioCtx.addEventListener("statechange", () => {
+        log(audioCtx.state === "running" ? "ok" : "warn", "AudioContext state → " + audioCtx.state);
+        paint();
+      });
+      paint();
+    } catch (err) {
+      log("warn", "AudioContext failed: " + err);
+    }
+  });
+
+  // Idle Detection API when permitted
+  async function tryIdle() {
+    if (!("IdleDetector" in window)) {
+      log("info", "IdleDetector unsupported");
+      return;
+    }
+    try {
+      const perm = await IdleDetector.requestPermission();
+      if (perm !== "granted") {
+        log("info", "IdleDetector permission=" + perm);
+        return;
+      }
+      const det = new IdleDetector();
+      det.addEventListener("change", () => {
+        log("warn", `IdleDetector user=${det.userState} screen=${det.screenState}`);
+      });
+      await det.start({ threshold: 60000 });
+      log("info", "IdleDetector started");
+    } catch (err) {
+      log("info", "IdleDetector unavailable: " + err.message);
+    }
+  }
+  tryIdle();
+
+  // Screen Wake Lock status if held
+  if (navigator.wakeLock) {
+    log("info", "Wake Lock API present (not requested)");
+  }
+
+  $("clearBtn").addEventListener("click", () => { logEl.textContent = ""; });
+  $("copyBtn").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(logEl.innerText);
+      log("info", "Log copied to clipboard");
+    } catch (err) {
+      log("warn", "Copy failed: " + err);
+    }
+  });
+
+  log("info", "Probe armed. Switch tabs, minimize, click another app, or test Cloak keep-active.");
+  paint();
+})();
+  </script>
+</body>
+</html>

@@ -36,6 +36,15 @@ class ListBackend(Backend):
     def unprotect_self(self):
         self.protected = False
 
+    def is_window(self, win_id):
+        return True
+
+    def ensure_focus_shield(self, win_id):
+        return True
+
+    def clear_focus_shield(self):
+        pass
+
 
 class AppTests(unittest.TestCase):
     def setUp(self):
@@ -64,6 +73,12 @@ class AppTests(unittest.TestCase):
         self.app.guard.toggle_pin(1)
         self.app.refresh()
         self.assertIn(1, self.app.guard.hidden)
+
+    def test_keep_active_marks_column(self):
+        self.app.tree.focus("1")
+        self.app.toggle_keep_active()
+        self.assertEqual(self.app.guard.keep_active, 1)
+        self.assertEqual(self.app.tree.set("1", "active"), "KEEP")
 
     def test_set_selected_hides_then_shows(self):
         self.app.tree.focus("1")

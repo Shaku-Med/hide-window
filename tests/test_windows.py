@@ -20,6 +20,33 @@ class WindowsBackendTests(unittest.TestCase):
         self.assertTrue(code.endswith(b"\xC3"))
         self.assertEqual(code[2:10], struct.pack("<Q", hwnd))
 
+    def test_getmessage_hook_builds(self):
+        from screen_guard.backends.focus_shield import build_subclass_wndproc
+        code = build_subclass_wndproc(0x10000, 0xAABBCCDDEEFF0011)
+        self.assertGreater(len(code), 40)
+        self.assertTrue(code.endswith(b"\xC3"))
+        self.assertIn(struct.pack("<Q", 0xAABBCCDDEEFF0011), code)
+
+    def test_resolve_wndproc_uses_class_proc_when_instance_zero(self):
+        """Chrome_WidgetWin_1 has GWLP_WNDPROC==0; shield must use GCLP_WNDPROC."""
+        import ctypes
+        from ctypes import wintypes
+        from screen_guard.backends import focus_shield
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            self.skipTest("no foreground window")
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, buf, 256)
+        if buf.value != "Chrome_WidgetWin_1":
+            self.skipTest("focus a Chrome/Brave window to run this check")
+        instance, call_target = focus_shield.resolve_wndproc(int(hwnd), True)
+        self.assertEqual(instance, 0)
+        self.assertNotEqual(call_target, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

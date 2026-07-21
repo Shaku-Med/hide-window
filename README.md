@@ -79,24 +79,74 @@ To hide one window by hand, select it and press Hide / show selected. You can
 also double click the row, or right click it for a small menu with Hide this
 window and Show this window. The Hidden column tells you what happened:
 
-- hidden means it worked
-- FAILED means the window could not be hidden, see the notes below
-- blank means we are leaving it alone
+* hidden means it worked
+* FAILED means the window could not be hidden, see the notes below
+* blank means we are leaving it alone
 
-The buttons along the bottom:
+## Keep a window active
 
-- Hide / show selected hides or shows the window you picked in the list.
-- Unhide ALL (reset) forces every visible window back to normal and turns auto
-  hide off. Reach for this if a window got stuck hidden after a crash. It stays
-  available even when nothing looks hidden, since that is exactly the case it
-  helps you recover from.
-- Minimize to tray hides the guard window but keeps it working. On Windows it
-  lives in the system tray. Double click the tray icon to bring it back, right
-  click for a menu.
-- Quit (stop protecting) puts everything back and closes.
+Browsers are nosy. When you click another window they fire blur, flip
+`document.hasFocus()`, and often treat you as gone. That is annoying if you want
+one tab to stay "present" while you type in a Cloak hidden window next to it.
 
-The same actions live in the Options menu at the top of the window if you prefer
-a dropdown.
+### How to use it
+
+1. Start Cloak as admin (`python safe.py`). Say yes to the permission prompt.
+2. Click the window that should stay present so Windows really focuses it first.
+   For a browser that means click inside the page, not just the title bar.
+3. In Cloak, select that same window in the list.
+4. Press **Keep selected active**. You can also right click the row or use the
+   Options menu. The Active column should say `KEEP`. If it says `FAILED`, open
+   Options → Open debug log and check `cloak_debug.log`.
+5. Hide the other window you want private, click into it, and work normally.
+   Typing and clicking there is the point. Real OS focus can sit on the hidden
+   window while the kept window still thinks you never left.
+6. When you are done, press Keep selected active again on that row, or use
+   Clear keep active in the menu.
+
+Order matters. Focus the "stay present" window, arm Keep selected active, then
+switch away. If you arm it while another app is already focused, Brave and
+Chrome are much likelier to fight you.
+
+### What Cloak is doing
+
+On Windows, Cloak reaches into the target process and subclasses the top level
+window so deactivate messages do not reach the browser the usual way. API hooks
+for GetFocus and friends are best effort. Browsers often block those. The
+subclass is the part that has to work. Run Cloak as admin so OpenProcess and the
+in process call are allowed.
+
+When you come back to the kept window, Cloak pulses focus again so the page does
+not get stuck looking "away" after a weird blur.
+
+### Try it with the focus probe
+
+There is a tiny local page that watches leave signals. From the repo root:
+
+```
+python focus_probe/server.py
+```
+
+Open the URL it prints (usually http://127.0.0.1:8765/) in Brave or Chrome.
+Follow the Keep selected active steps on that browser window, then click and type
+in another window. The big verdict on the page should stay **HERE**. Optional
+button on the page: Unlock audio probe. That only unlocks an AudioContext test.
+It should not flip the page to AWAY by itself.
+
+More detail lives in `focus_probe/README.md`.
+
+### Buttons along the bottom
+
+* **Hide / show selected** hides or shows the window you picked.
+* **Keep selected active** keeps that window looking focused while you work in
+  a hidden one.
+* **Unhide ALL (reset)** forces every visible window back to normal and turns
+  auto hide off. Use this if something got stuck hidden after a crash.
+* **Minimize to tray** hides the guard window but keeps it running. Double click
+  the tray icon to bring it back.
+* **Quit (stop protecting)** restores windows and closes Cloak.
+
+The same actions are in the Options menu if you prefer a dropdown.
 
 The window follows your system light or dark setting, including a dark title bar
 on Windows, and it has a sensible size range so it cannot be stretched out of
