@@ -278,8 +278,8 @@ class WindowsBackend(Backend):
     def __init__(self):
         self._own_hwnd = None
         self._tray = None
-        self._shield = None
-        self._shield_was_background = False
+        self._shields: dict[int, focus_shield.ShieldState] = {}
+        self._shield_background: dict[int, bool] = {}
         self._cursor = None
 
     def ensure_privileges(self) -> bool:
@@ -331,35 +331,38 @@ class WindowsBackend(Backend):
         return int(hwnd) if hwnd else None
 
     def ensure_focus_shield(self, window_id: int) -> bool:
-        if self._shield and self._shield.hwnd == window_id and focus_shield.is_alive(self._shield):
-            focus_shield.sync_children(self._shield)
+        shield = self._shields.get(window_id)
+        if shield and focus_shield.is_alive(shield):
+            focus_shield.sync_children(shield)
             fg = self.get_foreground()
             in_foreground = fg is not None and (fg == window_id or fg == self._own_hwnd)
             if in_foreground:
                 # User came back — pulse real focus so the page is not stuck AWAY.
-                if self._shield_was_background:
-                    focus_shield.resync_real_focus(self._shield)
-                self._shield_was_background = False
+                if self._shield_background.get(window_id):
+                    focus_shield.resync_real_focus(shield)
+                self._shield_background[window_id] = False
             else:
                 # Still elsewhere — keep the page believing it is focused.
-                focus_shield.reinforce(self._shield)
-                self._shield_was_background = True
+                focus_shield.reinforce(shield)
+                self._shield_background[window_id] = True
             return True
-        if self._shield:
-            focus_shield.remove(self._shield)
-            self._shield = None
+        if shield:
+            focus_shield.remove(shield)
+            self._shields.pop(window_id, None)
         state = focus_shield.install(window_id)
         if not state:
             return False
-        self._shield = state
-        self._shield_was_background = False
+        self._shields[window_id] = state
+        self._shield_background[window_id] = False
         return True
 
-    def clear_focus_shield(self) -> None:
-        if self._shield:
-            focus_shield.remove(self._shield)
-            self._shield = None
-        self._shield_was_background = False
+    def clear_focus_shield(self, window_id: int | None = None) -> None:
+        targets = [window_id] if window_id is not None else list(self._shields)
+        for target in targets:
+            shield = self._shields.pop(target, None)
+            if shield:
+                focus_shield.remove(shield)
+            self._shield_background.pop(target, None)
 
     supports_cursor_cloak = True
 

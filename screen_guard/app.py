@@ -13,6 +13,7 @@ REFRESH_MS = 2000
 FOCUS_MS = 50
 CURSOR_MS = 15
 CURSOR_IDLE_MS = 150
+GROUP_PREFIX = "g:"
 DEFAULT_KEYWORDS = ".env, password, secret, credential, .pem, api key, bitwarden"
 
 
@@ -25,6 +26,8 @@ class App:
         self.hide_self = tk.BooleanVar(value=True)
         self._focus_job = None
         self._cursor_job = None
+        self._groups: dict[str, list[int]] = {}
+        self._collapsed: set[str] = set()
 
         root.title(APP_NAME)
         root.geometry("720x640")
@@ -120,7 +123,7 @@ class App:
         self.tree.column("state", width=80, anchor="center")
         self.tree.column("active", width=80, anchor="center")
         self.tree.pack(fill="both", expand=True, padx=10, pady=10)
-        self.tree.bind("<Double-1>", self.toggle_selected)
+        self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-3>", self._show_context)
 
         self.context = self._menu(self.tree)
@@ -129,6 +132,17 @@ class App:
         self.context.add_separator()
         self.context.add_command(label="Keep this window active", command=self.toggle_keep_active)
         self.context.add_command(label="Clear keep active", command=self.clear_keep_active)
+
+        self.group_context = self._menu(self.tree)
+        self.group_context.add_command(label="Hide every window in this group",
+                                       command=lambda: self._set_selected(True))
+        self.group_context.add_command(label="Show every window in this group",
+                                       command=lambda: self._set_selected(False))
+        self.group_context.add_separator()
+        self.group_context.add_command(label="Keep every window in this group active",
+                                       command=lambda: self._set_group_keep_active(True))
+        self.group_context.add_command(label="Clear keep active for this group",
+                                       command=lambda: self._set_group_keep_active(False))
 
     def _build_buttons(self):
         bar = ttk.Frame(self.root, padding=10)
@@ -141,18 +155,38 @@ class App:
         self.status = ttk.Label(bar, text="")
         self.status.pack(side="right")
 
-    def toggle_selected(self, _event=None):
+    def _target_ids(self) -> list[int]:
+        """Windows the current row stands for: one, or every window in a group."""
         iid = self.tree.focus()
         if not iid:
-            return
-        self.guard.toggle_pin(int(iid))
-        self.refresh()
+            return []
+        if iid.startswith(GROUP_PREFIX):
+            return list(self._groups.get(iid, []))
+        return [int(iid)]
+
+    def _on_double_click(self, event):
+        row = self.tree.identify_row(event.y)
+        if not row or row.startswith(GROUP_PREFIX):
+            return  # let the group expand or collapse instead
+        self.toggle_selected()
+
+    def toggle_selected(self, _event=None):
+        ids = self._target_ids()
+        if ids:
+            self.guard.toggle_pin_group(ids)
+            self.refresh()
 
     def toggle_keep_active(self, _event=None):
-        iid = self.tree.focus()
-        if not iid:
+        ids = self._target_ids()
+        if ids:
+            self.guard.toggle_keep_active_group(ids)
+            self.refresh()
+
+    def _set_group_keep_active(self, on: bool):
+        ids = self._target_ids()
+        if not ids:
             return
-        self.guard.toggle_keep_active(int(iid))
+        self.guard.arm_keep_active(ids) if on else self.guard.disarm_keep_active(ids)
         self.refresh()
 
     def clear_keep_active(self):
@@ -170,12 +204,10 @@ class App:
             self.status.config(text=f"could not open log: {exc}")
 
     def _set_selected(self, hide: bool):
-        iid = self.tree.focus()
-        if not iid:
-            return
-        win_id = int(iid)
-        self.guard.pinned.add(win_id) if hide else self.guard.pinned.discard(win_id)
-        self.refresh()
+        ids = self._target_ids()
+        if ids:
+            self.guard.set_pinned(ids, hide)
+            self.refresh()
 
     def _show_context(self, event):
         row = self.tree.identify_row(event.y)
@@ -183,7 +215,8 @@ class App:
             return
         self.tree.focus(row)
         self.tree.selection_set(row)
-        self.context.tk_popup(event.x_root, event.y_root)
+        menu = self.group_context if row.startswith(GROUP_PREFIX) else self.context
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _apply_self_protection(self):
         if self.hide_self.get():
@@ -269,30 +302,61 @@ class App:
             if wanted:
                 hidden_count += 1
             mark = ("hidden" if ok else "FAILED") if wanted else ""
-            if self.guard.keep_active == window.id:
-                active = "KEEP" if self.guard.keep_active_ok else "FAILED"
-            else:
-                active = ""
-            rows.append((window, mark, active))
+            rows.append((window, mark, self.guard.keep_active_mark(window.id)))
 
-        keep = self.tree.focus()
-        self.tree.delete(*self.tree.get_children())
-        for window, mark, active in rows:
-            self.tree.insert("", "end", iid=str(window.id), text=window.title,
-                             values=(window.app, mark, active))
-        if keep and self.tree.exists(keep):
-            self.tree.focus(keep)
-            self.tree.selection_set(keep)
-
-        if self.guard.keep_active is not None:
-            if self.guard.keep_active_ok:
-                shield = "shield ok"
-            else:
-                from .backends import focus_shield
-                from .logutil import LOG_PATH
-                why = focus_shield.last_error or "unknown"
-                shield = f"shield FAILED: {why}  (see Options → Open debug log: {LOG_PATH.name})"
-            self.status.config(text=f"{hidden_count} hidden  .  {shield}")
-        else:
-            self.status.config(text=f"{hidden_count} window(s) hidden  .  guard running")
+        self._render(rows)
+        self.status.config(text=f"{hidden_count} hidden  .  {self._shield_status()}")
         self.root.after(REFRESH_MS, self.refresh)
+
+    def _remember_collapsed(self):
+        for iid in self.tree.get_children(""):
+            if not iid.startswith(GROUP_PREFIX):
+                continue
+            self._collapsed.discard(iid) if self.tree.item(iid, "open") else self._collapsed.add(iid)
+
+    def _render(self, rows):
+        """One row per window, but apps with several windows fold into a group."""
+        selected = self.tree.focus()
+        self._remember_collapsed()
+        self.tree.delete(*self.tree.get_children())
+        self._groups = {}
+
+        by_app: dict[str, list] = {}
+        for row in rows:
+            by_app.setdefault(row[0].app, []).append(row)
+
+        for app in sorted(by_app, key=str.lower):
+            items = by_app[app]
+            if len(items) < 2:
+                for window, mark, active in items:
+                    self.tree.insert("", "end", iid=str(window.id), text=window.title,
+                                     values=(window.app, mark, active))
+                continue
+            key = GROUP_PREFIX + app
+            self._groups[key] = [w.id for w, _, _ in items]
+            hidden = sum(1 for _, mark, _ in items if mark == "hidden")
+            kept = sum(1 for _, _, active in items if active == "KEEP")
+            total = len(items)
+            self.tree.insert("", "end", iid=key, text=f"{app}  ({total})",
+                             open=key not in self._collapsed,
+                             values=("", f"{hidden}/{total}" if hidden else "",
+                                     f"{kept}/{total}" if kept else ""))
+            for window, mark, active in items:
+                self.tree.insert(key, "end", iid=str(window.id), text=window.title,
+                                 values=(window.app, mark, active))
+
+        if selected and self.tree.exists(selected):
+            self.tree.focus(selected)
+            self.tree.selection_set(selected)
+
+    def _shield_status(self) -> str:
+        if not self.guard.keep_active:
+            return "guard running"
+        failed = [i for i in self.guard.keep_active if not self.guard.keep_active_ok.get(i)]
+        if not failed:
+            count = len(self.guard.keep_active)
+            return "shield ok" if count == 1 else f"shield ok on {count} windows"
+        from .backends import focus_shield
+        from .logutil import LOG_PATH
+        why = focus_shield.last_error or "unknown"
+        return f"shield FAILED on {len(failed)}: {why}  (see Options → Open debug log: {LOG_PATH.name})"

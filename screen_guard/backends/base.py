@@ -40,8 +40,8 @@ class Backend:
         """Make window_id keep believing it is active while another window has real focus."""
         return False
 
-    def clear_focus_shield(self) -> None:
-        """Remove any installed focus shield."""
+    def clear_focus_shield(self, window_id: int | None = None) -> None:
+        """Remove one installed focus shield, or all of them when window_id is None."""
         pass
 
     supports_cursor_cloak = False

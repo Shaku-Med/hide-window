@@ -77,6 +77,11 @@ DRIFT_PX = 3
 DRIFT_X_PERIOD = 90.0
 DRIFT_Y_PERIOD = 140.0
 
+# How fast the decoy glides back to its parking spot. Snapping there would look
+# like a teleport on the stream, so it eases instead.
+GLIDE = 0.16
+SNAP_PX = 1.0
+
 # Every cursor role, so no shape (I-beam, hand, resize) can leak.
 OCR_IDS = [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644,
            32645, 32646, 32648, 32649, 32650, 32651]
@@ -271,6 +276,11 @@ class Cloak:
     decoy: int
     engaged: bool = False
     phase: int = 0
+    decoy_x: float = 0.0
+    decoy_y: float = 0.0
+    parked: bool = False       # decoy has a known position to glide from
+    real_shown: bool = False
+    decoy_shown: bool = False
 
 
 def start(active_hwnd: int) -> Cloak | None:
@@ -298,16 +308,31 @@ def _window_rect(hwnd: int) -> wintypes.RECT | None:
     return rc if rc.right > rc.left and rc.bottom > rc.top else None
 
 
-def _user_is_back(state: Cloak, rc: wintypes.RECT) -> bool:
-    """True when the kept window is focused and the pointer is inside it, i.e. the
-    real cursor already looks natural on the stream and no decoy is wanted."""
-    fg = user32.GetForegroundWindow()
-    if int(fg or 0) != state.active_hwnd:
-        return False
+def _cursor_pos() -> wintypes.POINT | None:
     pt = wintypes.POINT()
-    if not user32.GetCursorPos(ctypes.byref(pt)):
-        return False
+    return pt if user32.GetCursorPos(ctypes.byref(pt)) else None
+
+
+def _inside(rc: wintypes.RECT, pt: wintypes.POINT) -> bool:
     return rc.left <= pt.x < rc.right and rc.top <= pt.y < rc.bottom
+
+
+def _set_shown(state: Cloak, hwnd: int, shown: bool, is_real: bool) -> None:
+    current = state.real_shown if is_real else state.decoy_shown
+    if current == shown:
+        return
+    user32.ShowWindow(hwnd, SW_SHOWNA if shown else SW_HIDE)
+    if shown:
+        user32.UpdateWindow(hwnd)
+    if is_real:
+        state.real_shown = shown
+    else:
+        state.decoy_shown = shown
+
+
+def _move(hwnd: int, x: float, y: float) -> None:
+    user32.SetWindowPos(hwnd, HWND_TOPMOST, int(round(x)), int(round(y)), 0, 0,
+                        SWP_NOSIZE | SWP_NOACTIVATE)
 
 
 def _engage(state: Cloak) -> bool:
@@ -316,43 +341,66 @@ def _engage(state: Cloak) -> bool:
     if not _hide_system_cursor():
         _restore_system_cursor()
         return False
-    user32.ShowWindow(state.real, SW_SHOWNA)
-    user32.ShowWindow(state.decoy, SW_SHOWNA)
-    user32.UpdateWindow(state.real)
-    user32.UpdateWindow(state.decoy)
     state.engaged = True
+    state.parked = False
     return True
 
 
 def _disengage(state: Cloak) -> None:
     if not state.engaged:
         return
-    user32.ShowWindow(state.real, SW_HIDE)
-    user32.ShowWindow(state.decoy, SW_HIDE)
+    _set_shown(state, state.real, False, True)
+    _set_shown(state, state.decoy, False, False)
     _restore_system_cursor()
     state.engaged = False
+    state.parked = False
 
 
 def update(state: Cloak) -> None:
     rc = _window_rect(state.active_hwnd)
-    if rc is None or _user_is_back(state, rc):
+    pt = _cursor_pos()
+    if rc is None or pt is None:
         _disengage(state)
         return
+
+    over_window = _inside(rc, pt)
+    focused = int(user32.GetForegroundWindow() or 0) == state.active_hwnd
+    if over_window and focused:
+        # Genuinely back: hand the real cursor over, shapes and all.
+        _disengage(state)
+        return
+
     if not _engage(state):
         return
 
-    pt = wintypes.POINT()
-    if user32.GetCursorPos(ctypes.byref(pt)):
-        user32.SetWindowPos(state.real, HWND_TOPMOST, pt.x, pt.y, 0, 0,
-                            SWP_NOSIZE | SWP_NOACTIVATE)
+    if over_window:
+        # Pointer is hovering the kept window while the user works elsewhere.
+        # Its real position is already natural for the stream, so both sides
+        # share the decoy and the follow overlay steps aside. One pointer, no
+        # lag, and nothing jumps when you cross the window edge.
+        _set_shown(state, state.real, False, True)
+        _set_shown(state, state.decoy, True, False)
+        state.decoy_x, state.decoy_y = float(pt.x), float(pt.y)
+        state.parked = True
+        _move(state.decoy, state.decoy_x, state.decoy_y)
+        return
+
+    _set_shown(state, state.real, True, True)
+    _set_shown(state, state.decoy, True, False)
+    _move(state.real, pt.x, pt.y)
 
     state.phase += 1
-    dx = round(DRIFT_PX * math.sin(state.phase / DRIFT_X_PERIOD))
-    dy = round(DRIFT_PX * math.sin(state.phase / DRIFT_Y_PERIOD))
-    x = rc.left + (rc.right - rc.left) // 2 + dx
-    y = rc.top + (rc.bottom - rc.top) // 2 + dy
-    user32.SetWindowPos(state.decoy, HWND_TOPMOST, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOACTIVATE)
+    target_x = rc.left + (rc.right - rc.left) / 2 + DRIFT_PX * math.sin(state.phase / DRIFT_X_PERIOD)
+    target_y = rc.top + (rc.bottom - rc.top) / 2 + DRIFT_PX * math.sin(state.phase / DRIFT_Y_PERIOD)
+    if not state.parked:
+        state.decoy_x, state.decoy_y = target_x, target_y
+        state.parked = True
+    else:
+        state.decoy_x += (target_x - state.decoy_x) * GLIDE
+        state.decoy_y += (target_y - state.decoy_y) * GLIDE
+        if abs(target_x - state.decoy_x) < SNAP_PX and abs(target_y - state.decoy_y) < SNAP_PX:
+            state.decoy_x, state.decoy_y = target_x, target_y
+    _move(state.decoy, state.decoy_x, state.decoy_y)
 
 
 def is_alive(state: Cloak) -> bool:

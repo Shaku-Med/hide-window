@@ -75,6 +75,17 @@ Type comma separated words into the keyword box. Any window whose title contains
 one of them gets hidden automatically while auto hide is on. The defaults cover
 common things like password, secret, and bitwarden.
 
+When one app has several windows open they fold into a collapsible group under
+the app name, with a count next to it. Click the arrow to open or close it, and
+Cloak remembers which groups you left closed. Apps with a single window stay as
+plain rows.
+
+Right click a group to act on everything inside it at once: hide them all, show
+them all, keep them all active, or clear keep active for the group. The Hidden and
+Active columns on the group row show how many of its windows are covered, like
+2/3. Selecting one window inside a group and using the normal buttons still works
+exactly as before, so grouping never takes the single window controls away.
+
 To hide one window by hand, select it and press Hide / show selected. You can
 also double click the row, or right click it for a small menu with Hide this
 window and Show this window. The Hidden column tells you what happened:
@@ -148,6 +159,13 @@ would see it too, and coming back to the kept window would leave two pointers on
 screen. So the moment the kept window is focused again with your mouse inside it,
 Cloak drops the whole thing and hands you the normal system cursor back. Step away
 and it re engages on its own. You do not have to toggle anything.
+
+Hovering the kept window without leaving your hidden one is handled the same way.
+Your pointer is already sitting somewhere believable, so the follow arrow steps
+aside and the decoy takes over the real position, tracking you exactly. One
+pointer, no lag, nothing doubled. When you move back off the window the decoy
+glides to its resting spot instead of snapping there, so the stream never sees it
+teleport.
 
 Two things to know. The overlay is always an arrow, so while you are away you will
 not see the I-beam or resize cursors on your own screen. And the system cursor

@@ -39,7 +39,7 @@ class FakeBackend(Backend):
         self.shielded = win_id
         return True
 
-    def clear_focus_shield(self):
+    def clear_focus_shield(self, win_id=None):
         self.shield_clears += 1
         self.shielded = None
 
@@ -156,12 +156,12 @@ class HousekeepingTests(unittest.TestCase):
         guard.pinned = {1}
         guard.hidden = {1}
         guard.fail_count = {1: 2}
-        guard.keep_active = 1
+        guard.arm_keep_active([1])
         guard.unhide_all([window(1), window(2)])
         self.assertEqual(guard.pinned, set())
         self.assertEqual(guard.hidden, set())
         self.assertEqual(guard.fail_count, {})
-        self.assertIsNone(guard.keep_active)
+        self.assertEqual(guard.keep_active, set())
         self.assertEqual(sorted(backend.show_calls), [1, 2])
 
 
@@ -170,48 +170,107 @@ class KeepActiveTests(unittest.TestCase):
         backend = FakeBackend()
         guard = Guard(backend)
         guard.toggle_keep_active(4)
-        self.assertEqual(guard.keep_active, 4)
+        self.assertEqual(guard.keep_active, {4})
         self.assertEqual(backend.shield_calls, [4])
         guard.toggle_keep_active(4)
-        self.assertIsNone(guard.keep_active)
+        self.assertEqual(guard.keep_active, set())
         self.assertGreaterEqual(backend.shield_clears, 1)
 
-    def test_toggle_switches_target(self):
+    def test_toggle_adds_second_target(self):
         backend = FakeBackend()
         guard = Guard(backend)
         guard.toggle_keep_active(1)
         guard.toggle_keep_active(2)
-        self.assertEqual(guard.keep_active, 2)
-        self.assertEqual(backend.shielded, 2)
+        self.assertEqual(guard.keep_active, {1, 2})
+        self.assertEqual(guard.keep_primary, 2)
 
     def test_sync_clears_dead_keep_active(self):
         backend = FakeBackend()
         guard = Guard(backend)
-        guard.keep_active = 9
+        guard.arm_keep_active([9])
         guard.sync(live={1, 2})
-        self.assertIsNone(guard.keep_active)
+        self.assertEqual(guard.keep_active, set())
         self.assertGreaterEqual(backend.shield_clears, 1)
 
     def test_tick_focus_installs_shield_without_stealing_focus(self):
         backend = FakeBackend()
         backend.windows = {5}
         guard = Guard(backend)
-        guard.keep_active = 5
+        guard.keep_active = {5}
         guard.tick_focus()
         self.assertEqual(backend.shield_calls, [5])
         self.assertEqual(backend.shielded, 5)
-        self.assertTrue(guard.keep_active_ok)
+        self.assertTrue(guard.keep_active_ok[5])
 
     def test_clear_keep_active_removes_shield(self):
         backend = FakeBackend()
         guard = Guard(backend)
         guard.toggle_keep_active(1)
-        self.assertTrue(guard.keep_active_ok)
+        self.assertTrue(guard.keep_active_ok[1])
         guard.clear_keep_active()
-        self.assertIsNone(guard.keep_active)
+        self.assertEqual(guard.keep_active, set())
         self.assertFalse(guard.keep_active_ok)
+        self.assertIsNone(guard.keep_primary)
         self.assertIsNone(backend.shielded)
         self.assertGreaterEqual(backend.shield_clears, 1)
+
+
+class GroupActionTests(unittest.TestCase):
+    def test_set_pinned_applies_to_every_id(self):
+        guard = Guard(FakeBackend())
+        guard.set_pinned([1, 2, 3], True)
+        self.assertEqual(guard.pinned, {1, 2, 3})
+        guard.set_pinned([1, 2, 3], False)
+        self.assertEqual(guard.pinned, set())
+
+    def test_toggle_group_hides_all_then_shows_all(self):
+        guard = Guard(FakeBackend())
+        guard.pinned = {1}
+        guard.toggle_pin_group([1, 2])
+        self.assertEqual(guard.pinned, {1, 2})
+        guard.toggle_pin_group([1, 2])
+        self.assertEqual(guard.pinned, set())
+
+    def test_keep_active_group_arms_every_window(self):
+        backend = FakeBackend()
+        guard = Guard(backend)
+        guard.toggle_keep_active_group([1, 2, 3])
+        self.assertEqual(guard.keep_active, {1, 2, 3})
+        self.assertEqual(sorted(backend.shield_calls), [1, 2, 3])
+
+    def test_keep_active_group_clears_when_all_armed(self):
+        guard = Guard(FakeBackend())
+        guard.arm_keep_active([1, 2])
+        guard.toggle_keep_active_group([1, 2])
+        self.assertEqual(guard.keep_active, set())
+
+    def test_keep_active_group_arms_remainder_when_partial(self):
+        guard = Guard(FakeBackend())
+        guard.arm_keep_active([1])
+        guard.toggle_keep_active_group([1, 2])
+        self.assertEqual(guard.keep_active, {1, 2})
+
+    def test_disarm_one_keeps_the_others(self):
+        guard = Guard(FakeBackend())
+        guard.arm_keep_active([1, 2])
+        guard.disarm_keep_active([1])
+        self.assertEqual(guard.keep_active, {2})
+        self.assertEqual(guard.keep_primary, 2)
+
+    def test_mark_reports_keep_and_failure(self):
+        backend = FakeBackend()
+        guard = Guard(backend)
+        guard.arm_keep_active([1])
+        self.assertEqual(guard.keep_active_mark(1), "KEEP")
+        self.assertEqual(guard.keep_active_mark(2), "")
+        guard.keep_active_ok[1] = False
+        self.assertEqual(guard.keep_active_mark(1), "FAILED")
+
+    def test_sync_drops_only_dead_kept_windows(self):
+        guard = Guard(FakeBackend())
+        guard.arm_keep_active([1, 2])
+        guard.sync(live={2})
+        self.assertEqual(guard.keep_active, {2})
 
 
 if __name__ == "__main__":

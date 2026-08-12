@@ -42,7 +42,7 @@ class ListBackend(Backend):
     def ensure_focus_shield(self, win_id):
         return True
 
-    def clear_focus_shield(self):
+    def clear_focus_shield(self, win_id=None):
         pass
 
 
@@ -77,7 +77,7 @@ class AppTests(unittest.TestCase):
     def test_keep_active_marks_column(self):
         self.app.tree.focus("1")
         self.app.toggle_keep_active()
-        self.assertEqual(self.app.guard.keep_active, 1)
+        self.assertEqual(self.app.guard.keep_active, {1})
         self.assertEqual(self.app.tree.set("1", "active"), "KEEP")
 
     def test_set_selected_hides_then_shows(self):
