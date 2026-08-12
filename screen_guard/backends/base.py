@@ -62,6 +62,13 @@ class Backend:
         """Force the system cursor back, even with no live cloak (crash recovery)."""
         pass
 
+    supports_anti_occlusion = False
+    anti_occlusion = False
+
+    def set_anti_occlusion(self, enabled: bool, window_ids=()) -> None:
+        """Stop hidden windows from making the kept window look covered."""
+        pass
+
     supports_tray = False
     supports_keep_active = False
 

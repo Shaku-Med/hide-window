@@ -140,6 +140,36 @@ outside the chosen window is affected now.
 When you come back to the kept window, Cloak pulses focus again so the app does
 not get stuck looking "away" after a stray blur.
 
+### Covering the kept window
+
+Focus is not the only way a page can tell you left. Chromium also works out
+whether its window is actually on screen by walking the windows stacked on top of
+it, and when it decides it is fully covered it throttles timers to about one tick
+a second and drops animation frames to roughly one a second. A page can measure
+that even while focus and visibility still look perfectly normal, which is exactly
+what the focus probe reports as heavily throttled.
+
+That happens the moment you put a hidden window fullscreen over the kept one, and
+no amount of focus work fixes it, because the decision is made from window
+geometry rather than from anything sent to the window.
+
+Cloak handles it from the other side. Chromium ignores any window that is not
+fully opaque when it works out what is covering what, so every window Cloak hides
+is nudged to 254 out of 255 opacity. You cannot see the difference, the window
+still takes clicks and keys normally, and Chromium stops counting it as covering
+anything. Timers and frames keep running at full speed underneath.
+
+Windows that already manage their own transparency are left untouched, and the
+original style goes back when the window is shown again. If some app misbehaves
+with it, turn off **Stop hidden windows throttling the kept one** in the Options
+menu and everything reverts.
+
+If you ever need the browser side of this instead, Chromium accepts
+`--disable-backgrounding-occluded-windows` and
+`--disable-features=CalculateNativeWinOcclusion` at launch, which switches the
+detection off wholesale. Cloak does not need it, and it only applies to a browser
+you start yourself with those flags.
+
 ### The cursor
 
 Windows has one shared cursor and every screen capturer reads it directly, so

@@ -14,11 +14,20 @@ class WindowsBackendTests(unittest.TestCase):
     def test_shellcode_layout(self):
         from screen_guard.backends.windows import _shellcode
         hwnd = 0x1122334455667788
-        code = _shellcode(hwnd, 0x11, 0xAABBCCDDEEFF0011)
-        self.assertEqual(len(code), 36)
+        func = 0xAABBCCDDEEFF0011
+        code = _shellcode(func, hwnd, 0x11)
         self.assertTrue(code.startswith(b"\x48\xB9"))
         self.assertTrue(code.endswith(b"\xC3"))
-        self.assertEqual(code[2:10], struct.pack("<Q", hwnd))
+        self.assertEqual(code[2:10], struct.pack("<Q", hwnd))       # rcx = hwnd
+        self.assertEqual(code[12:20], struct.pack("<Q", 0x11))      # rdx = second arg
+        self.assertIn(struct.pack("<Q", func), code)
+        self.assertIn(b"\xFF\xD0", code)                            # call rax
+
+    def test_shellcode_carries_all_four_args(self):
+        from screen_guard.backends.windows import _shellcode
+        code = _shellcode(0xDEAD, 1, 2, 3, 4)
+        for reg, value in ((b"\x48\xB9", 1), (b"\x48\xBA", 2), (b"\x49\xB8", 3), (b"\x49\xB9", 4)):
+            self.assertIn(reg + struct.pack("<Q", value), code)
 
     def test_getmessage_hook_builds(self):
         from screen_guard.backends.focus_shield import build_subclass_wndproc

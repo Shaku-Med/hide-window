@@ -24,6 +24,7 @@ class App:
         self.guard = Guard(backend)
         self.auto = tk.BooleanVar(value=True)
         self.hide_self = tk.BooleanVar(value=True)
+        self.anti_occlusion = tk.BooleanVar(value=backend.anti_occlusion)
         self._focus_job = None
         self._cursor_job = None
         self._groups: dict[str, list[int]] = {}
@@ -73,6 +74,10 @@ class App:
         options.add_checkbutton(label="Auto hide by keyword", variable=self.auto, command=self.refresh)
         options.add_checkbutton(label="Hide this app from capture", variable=self.hide_self,
                                 command=self._apply_self_protection)
+        if self.backend.supports_anti_occlusion:
+            options.add_checkbutton(label="Stop hidden windows throttling the kept one",
+                                    variable=self.anti_occlusion,
+                                    command=self._apply_anti_occlusion)
         options.add_separator()
         options.add_command(label="Hide or show selected window", command=self.toggle_selected)
         options.add_command(label="Keep selected window active", command=self.toggle_keep_active)
@@ -217,6 +222,10 @@ class App:
         self.tree.selection_set(row)
         menu = self.group_context if row.startswith(GROUP_PREFIX) else self.context
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _apply_anti_occlusion(self):
+        self.backend.set_anti_occlusion(self.anti_occlusion.get(), set(self.guard.hidden))
+        self.refresh()
 
     def _apply_self_protection(self):
         if self.hide_self.get():

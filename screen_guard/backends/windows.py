@@ -19,6 +19,26 @@ shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
+# Chromium decides a window is "not on screen" by walking the windows stacked on
+# top of it, and it throttles timers and animation frames when it concludes it is
+# covered. A hidden window sitting over the kept one triggers exactly that, which
+# a page can measure even though focus and visibility look clean.
+#
+# Its occluder test (ui/gfx/win/hwnd_util.cc, IsWindowVisibleAndFullyOpaque) skips
+# any window whose layered alpha is below 255. WS_EX_TRANSPARENT would also work
+# but makes the window click through, so alpha is the usable lever: 254 is visually
+# indistinguishable and keeps the window fully interactive.
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+LWA_ALPHA = 0x00000002
+NO_OCCLUDE_ALPHA = 254
+
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_CREATE_THREAD = 0x0002
 PROCESS_VM_OPERATION = 0x0008
@@ -120,6 +140,11 @@ def _bind():
     user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
     user32.GetAncestor.restype = wintypes.HWND
     user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = wintypes.DWORD
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user32.SetWindowPos.restype = wintypes.BOOL
 
     kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
     kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
@@ -145,7 +170,10 @@ def _bind():
 
 
 _bind()
+# System DLLs share one session ASLR base, so a local address is valid remotely.
 SWDA_ADDR = ctypes.cast(user32.SetWindowDisplayAffinity, ctypes.c_void_p).value
+SLWA_ADDR = ctypes.cast(user32.SetLayeredWindowAttributes, ctypes.c_void_p).value
+SETWLP_ADDR = ctypes.cast(user32.SetWindowLongPtrW, ctypes.c_void_p).value
 IS_64BIT = ctypes.sizeof(ctypes.c_void_p) == 8
 
 
@@ -175,59 +203,94 @@ def _app_label(proc: str) -> str:
     return proc or "?"
 
 
-def _shellcode(hwnd: int, affinity: int, func_addr: int) -> bytes:
-    # mov rcx,hwnd  mov edx,affinity  mov rax,func  sub rsp,0x28  call rax  add rsp,0x28  ret
+def _shellcode(func_addr: int, a1: int, a2: int = 0, a3: int = 0, a4: int = 0) -> bytes:
+    """x64: load the four register args, call func_addr, return its result."""
+    def q(value: int) -> bytes:
+        return struct.pack("<Q", value & 0xFFFFFFFFFFFFFFFF)
+
     return (
-        b"\x48\xB9" + struct.pack("<Q", hwnd & 0xFFFFFFFFFFFFFFFF) +
-        b"\xBA" + struct.pack("<I", affinity & 0xFFFFFFFF) +
-        b"\x48\xB8" + struct.pack("<Q", func_addr) +
-        b"\x48\x83\xEC\x28" +
-        b"\xFF\xD0" +
-        b"\x48\x83\xC4\x28" +
+        b"\x48\xB9" + q(a1) +          # mov rcx, a1
+        b"\x48\xBA" + q(a2) +          # mov rdx, a2
+        b"\x49\xB8" + q(a3) +          # mov r8,  a3
+        b"\x49\xB9" + q(a4) +          # mov r9,  a4
+        b"\x48\xB8" + q(func_addr) +   # mov rax, func
+        b"\x48\x83\xEC\x28" +          # sub rsp, 0x28
+        b"\xFF\xD0" +                  # call rax
+        b"\x48\x83\xC4\x28" +          # add rsp, 0x28
         b"\xC3"
     )
 
 
-def _inject_affinity(hwnd: int, affinity: int) -> bool:
-    """Run SetWindowDisplayAffinity from inside the window's own process."""
-    if not user32.IsWindow(hwnd) or not IS_64BIT or not SWDA_ADDR:
-        return False
+def _inject_call(hwnd: int, func_addr: int, *args: int) -> int | None:
+    """Run a win32 call from inside the window's own process. Returns the low 32
+    bits of its result, or None if the call could not be made."""
+    if not user32.IsWindow(hwnd) or not IS_64BIT or not func_addr:
+        return None
 
     pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     if not pid.value:
-        return False
+        return None
 
     handle = kernel32.OpenProcess(INJECT_ACCESS, False, pid.value)
     if not handle:
-        return False
+        return None
     try:
         wow64 = wintypes.BOOL()
         if kernel32.IsWow64Process(handle, ctypes.byref(wow64)) and wow64.value:
-            return False
+            return None
 
-        code = _shellcode(hwnd, affinity, SWDA_ADDR)
+        code = _shellcode(func_addr, *args)
         addr = kernel32.VirtualAllocEx(handle, None, len(code), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
         if not addr:
-            return False
+            return None
         try:
             written = ctypes.c_size_t(0)
             if not kernel32.WriteProcessMemory(handle, addr, code, len(code), ctypes.byref(written)):
-                return False
+                return None
             thread = kernel32.CreateRemoteThread(handle, None, 0, addr, None, 0, None)
             if not thread:
-                return False
+                return None
             try:
                 kernel32.WaitForSingleObject(thread, 5000)
                 result = wintypes.DWORD()
                 kernel32.GetExitCodeThread(thread, ctypes.byref(result))
-                return bool(result.value)
+                return int(result.value)
             finally:
                 kernel32.CloseHandle(thread)
         finally:
             kernel32.VirtualFreeEx(handle, addr, 0, MEM_RELEASE)
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _inject_affinity(hwnd: int, affinity: int) -> bool:
+    """Run SetWindowDisplayAffinity from inside the window's own process."""
+    return bool(_inject_call(hwnd, SWDA_ADDR, hwnd, affinity))
+
+
+def _make_non_occluding(hwnd: int) -> int | None:
+    """Drop the window just under fully opaque so Chromium stops counting it as
+    covering whatever is behind it. Returns the original ex-style to restore, or
+    None if nothing was changed."""
+    ex = int(user32.GetWindowLongW(hwnd, GWL_EXSTYLE))
+    if not ex or ex & WS_EX_LAYERED:
+        return None  # already layered: it has its own setup, leave it alone
+    if _inject_call(hwnd, SETWLP_ADDR, hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED) is None:
+        return None
+    if not int(user32.GetWindowLongW(hwnd, GWL_EXSTYLE)) & WS_EX_LAYERED:
+        return None
+    _inject_call(hwnd, SLWA_ADDR, hwnd, 0, NO_OCCLUDE_ALPHA, LWA_ALPHA)
+    user32.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+    return ex
+
+
+def _restore_occluding(hwnd: int, ex_style: int) -> None:
+    if user32.IsWindow(hwnd):
+        _inject_call(hwnd, SETWLP_ADDR, hwnd, GWL_EXSTYLE, ex_style)
+        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
 
 
 def _enable_debug_privilege() -> None:
@@ -274,8 +337,11 @@ class WindowsBackend(Backend):
     name = "windows"
     can_hide_other_apps = True
     supports_keep_active = True
+    supports_anti_occlusion = True
 
     def __init__(self):
+        self.anti_occlusion = True
+        self._unoccluded: dict[int, int] = {}
         self._own_hwnd = None
         self._tray = None
         self._shields: dict[int, focus_shield.ShieldState] = {}
@@ -318,10 +384,33 @@ class WindowsBackend(Backend):
         return found
 
     def hide(self, window_id: int) -> bool:
-        return _inject_affinity(window_id, WDA_EXCLUDEFROMCAPTURE)
+        ok = _inject_affinity(window_id, WDA_EXCLUDEFROMCAPTURE)
+        if ok and self.anti_occlusion and window_id not in self._unoccluded:
+            ex = _make_non_occluding(window_id)
+            if ex is not None:
+                self._unoccluded[window_id] = ex
+        return ok
 
     def show(self, window_id: int) -> bool:
+        self._revert_occlusion(window_id)
         return _inject_affinity(window_id, WDA_NONE)
+
+    def _revert_occlusion(self, window_id: int) -> None:
+        ex = self._unoccluded.pop(window_id, None)
+        if ex is not None:
+            _restore_occluding(window_id, ex)
+
+    def set_anti_occlusion(self, enabled: bool, window_ids=()) -> None:
+        self.anti_occlusion = enabled
+        if enabled:
+            for win_id in window_ids:
+                if win_id not in self._unoccluded:
+                    ex = _make_non_occluding(win_id)
+                    if ex is not None:
+                        self._unoccluded[win_id] = ex
+            return
+        for win_id in list(self._unoccluded):
+            self._revert_occlusion(win_id)
 
     def is_window(self, window_id: int) -> bool:
         return bool(user32.IsWindow(window_id))
