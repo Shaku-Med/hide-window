@@ -44,6 +44,24 @@ class Backend:
         """Remove any installed focus shield."""
         pass
 
+    supports_cursor_cloak = False
+
+    def start_cursor_cloak(self, active_window_id: int) -> bool:
+        """Hide the real cursor from capture and park a decoy in the active window."""
+        return False
+
+    def update_cursor_cloak(self) -> bool:
+        """Move the follow cursor to the mouse. Returns True while cloaking."""
+        return False
+
+    def stop_cursor_cloak(self) -> None:
+        """Restore the system cursor and drop the overlays."""
+        pass
+
+    def reset_cursor(self) -> None:
+        """Force the system cursor back, even with no live cloak (crash recovery)."""
+        pass
+
     supports_tray = False
     supports_keep_active = False
 

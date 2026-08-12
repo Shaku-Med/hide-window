@@ -9,7 +9,7 @@ from typing import Callable
 from ..about import APP_NAME
 from ..assets import logo_ico
 from ..model import WindowInfo
-from . import focus_shield
+from . import cursor_cloak, focus_shield
 from .base import Backend
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -280,6 +280,7 @@ class WindowsBackend(Backend):
         self._tray = None
         self._shield = None
         self._shield_was_background = False
+        self._cursor = None
 
     def ensure_privileges(self) -> bool:
         try:
@@ -360,6 +361,35 @@ class WindowsBackend(Backend):
             self._shield = None
         self._shield_was_background = False
 
+    supports_cursor_cloak = True
+
+    def start_cursor_cloak(self, active_window_id: int) -> bool:
+        if self._cursor:
+            if self._cursor.active_hwnd == active_window_id and cursor_cloak.is_alive(self._cursor):
+                return True
+            cursor_cloak.stop(self._cursor)
+            self._cursor = None
+        self._cursor = cursor_cloak.start(active_window_id)
+        return self._cursor is not None
+
+    def update_cursor_cloak(self) -> bool:
+        if not self._cursor:
+            return False
+        if not cursor_cloak.is_alive(self._cursor):
+            self.stop_cursor_cloak()
+            return False
+        cursor_cloak.update(self._cursor)
+        return True
+
+    def stop_cursor_cloak(self) -> None:
+        if self._cursor:
+            cursor_cloak.stop(self._cursor)
+            self._cursor = None
+
+    def reset_cursor(self) -> None:
+        self.stop_cursor_cloak()
+        cursor_cloak.force_restore()
+
     def protect_self(self, tk_root) -> bool:
         try:
             tk_root.update_idletasks()
@@ -371,6 +401,7 @@ class WindowsBackend(Backend):
             return False
 
     def unprotect_self(self) -> None:
+        self.stop_cursor_cloak()
         self.clear_focus_shield()
         if self._own_hwnd:
             try:

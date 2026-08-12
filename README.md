@@ -85,9 +85,14 @@ window and Show this window. The Hidden column tells you what happened:
 
 ## Keep a window active
 
-Browsers are nosy. When you click another window they fire blur, flip
-`document.hasFocus()`, and often treat you as gone. That is annoying if you want
-one tab to stay "present" while you type in a Cloak hidden window next to it.
+Plenty of apps watch for you leaving. When you click another window they get told
+they were deactivated, and they act on it: dimming, pausing, marking you away,
+stopping a timer. Keep active stops that one window from hearing you left, so it
+stays "present" while you work in a Cloak hidden window next to it.
+
+This works on any app, not just browsers. Browsers are simply the loudest example,
+since a page also fires blur and flips `document.hasFocus()` the moment you click
+away, so they are what the notes below use for illustration.
 
 ### How to use it
 
@@ -105,19 +110,50 @@ one tab to stay "present" while you type in a Cloak hidden window next to it.
    Clear keep active in the menu.
 
 Order matters. Focus the "stay present" window, arm Keep selected active, then
-switch away. If you arm it while another app is already focused, Brave and
-Chrome are much likelier to fight you.
+switch away. If you arm it while another app is already focused, some apps will
+fight you, and Chromium browsers are the worst about it.
 
 ### What Cloak is doing
 
-On Windows, Cloak reaches into the target process and subclasses the top level
-window so deactivate messages do not reach the browser the usual way. API hooks
-for GetFocus and friends are best effort. Browsers often block those. The
-subclass is the part that has to work. Run Cloak as admin so OpenProcess and the
-in process call are allowed.
+On Windows, Cloak reaches into the target process and subclasses that one top
+level window, so the messages telling it that it was deactivated never arrive.
+Those are ordinary window messages every Windows app receives, which is why this
+is not a browser specific trick. Run Cloak as admin so OpenProcess and the in
+process call are allowed.
 
-When you come back to the kept window, Cloak pulses focus again so the page does
-not get stuck looking "away" after a weird blur.
+It only touches the window you picked. An earlier version also patched the focus
+APIs inside the target process, but those are shared by everything running in it,
+so every other window of that app stopped responding. That is gone. Nothing
+outside the chosen window is affected now.
+
+When you come back to the kept window, Cloak pulses focus again so the app does
+not get stuck looking "away" after a stray blur.
+
+### The cursor
+
+Windows has one shared cursor and every screen capturer reads it directly, so
+normally the pointer gives you away. It drifts into the empty space where your
+hidden window sits, and it flips to a text caret when you type. There is no way
+to show yourself one cursor position and the capture a different one.
+
+While Keep active is on, Cloak works around this. It makes the real system cursor
+invisible, draws a pointer you can still see as an overlay that follows your mouse
+and is left out of any capture, and parks a decoy pointer inside the kept window.
+The result: on your side the cursor moves normally, and on the stream it rests
+inside the active window and never changes shape. The decoy wanders a few pixels
+so it does not look frozen.
+
+It only does this while you are actually away. The decoy is a real window, so you
+would see it too, and coming back to the kept window would leave two pointers on
+screen. So the moment the kept window is focused again with your mouse inside it,
+Cloak drops the whole thing and hands you the normal system cursor back. Step away
+and it re engages on its own. You do not have to toggle anything.
+
+Two things to know. The overlay is always an arrow, so while you are away you will
+not see the I-beam or resize cursors on your own screen. And the system cursor
+change is desktop wide, so if Cloak is hard killed the pointer can stay invisible
+until something restores it. Quit, Ctrl C, or Unhide ALL (reset) all put it back,
+and reset also fixes it after a hard kill.
 
 ### Try it with the focus probe
 

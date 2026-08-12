@@ -11,6 +11,8 @@ from .controller import Guard
 
 REFRESH_MS = 2000
 FOCUS_MS = 50
+CURSOR_MS = 15
+CURSOR_IDLE_MS = 150
 DEFAULT_KEYWORDS = ".env, password, secret, credential, .pem, api key, bitwarden"
 
 
@@ -22,6 +24,7 @@ class App:
         self.auto = tk.BooleanVar(value=True)
         self.hide_self = tk.BooleanVar(value=True)
         self._focus_job = None
+        self._cursor_job = None
 
         root.title(APP_NAME)
         root.geometry("720x640")
@@ -44,6 +47,7 @@ class App:
         self._apply_self_protection()
         self.refresh()
         self._tick_focus()
+        self._tick_cursor()
 
     def _set_window_icon(self):
         png = assets.logo_png()
@@ -84,7 +88,7 @@ class App:
         ttk.Label(head, text="Select a window, then use the Hide or show button. Double click and right click work too.").pack(anchor="w")
         ttk.Label(
             head,
-            text="Keep active: click the window that must stay 'present' so it is focused, then press Keep selected active, then switch to your hidden window and type normally. Brave/Chrome need this order.",
+            text="Keep active: click the window that must stay 'present' so it is focused, then press Keep selected active, then switch to your hidden window and type normally. Works on any app; browsers are the strictest about this order.",
             foreground=self.palette["muted"],
             wraplength=680,
             justify="left",
@@ -216,12 +220,14 @@ class App:
         self.refresh()
 
     def quit(self):
-        if self._focus_job is not None:
-            try:
-                self.root.after_cancel(self._focus_job)
-            except Exception:
-                pass
-            self._focus_job = None
+        for job in ("_focus_job", "_cursor_job"):
+            handle = getattr(self, job)
+            if handle is not None:
+                try:
+                    self.root.after_cancel(handle)
+                except Exception:
+                    pass
+                setattr(self, job, None)
         self.restore_all()
         if self.backend.supports_tray:
             self.backend.remove_tray()
@@ -236,6 +242,18 @@ class App:
             self._focus_job = self.root.after(FOCUS_MS, self._tick_focus)
         except tk.TclError:
             self._focus_job = None
+
+    def _tick_cursor(self):
+        active = False
+        try:
+            active = self.backend.update_cursor_cloak()
+        except Exception:
+            active = False
+        try:
+            delay = CURSOR_MS if active else CURSOR_IDLE_MS
+            self._cursor_job = self.root.after(delay, self._tick_cursor)
+        except tk.TclError:
+            self._cursor_job = None
 
     def refresh(self):
         windows = self.backend.list_windows()

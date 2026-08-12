@@ -33,10 +33,12 @@ class Guard:
         self.backend.clear_focus_shield()
         self.keep_active = win_id
         self.keep_active_ok = self.backend.ensure_focus_shield(win_id)
+        self.backend.start_cursor_cloak(win_id)
 
     def clear_keep_active(self) -> None:
         self.keep_active = None
         self.keep_active_ok = False
+        self.backend.stop_cursor_cloak()
         self.backend.clear_focus_shield()
 
     def sync(self, live: set[int]) -> None:
@@ -90,6 +92,7 @@ class Guard:
 
     def unhide_all(self, windows: Iterable[WindowInfo]) -> None:
         self.clear_keep_active()
+        self.backend.reset_cursor()
         self.pinned.clear()
         for window in windows:
             self.backend.show(window.id)
