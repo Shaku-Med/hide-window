@@ -42,9 +42,6 @@ MEM_RESERVE = 0x2000
 MEM_RELEASE = 0x8000
 PAGE_EXECUTE_READWRITE = 0x40
 
-TH32CS_SNAPMODULE = 0x00000008
-TH32CS_SNAPMODULE32 = 0x00000010
-
 GWLP_WNDPROC = -4
 GCLP_WNDPROC = -24
 WM_ACTIVATE = 0x0006
@@ -52,21 +49,10 @@ WM_SETFOCUS = 0x0007
 WM_KILLFOCUS = 0x0008
 WM_ACTIVATEAPP = 0x001C
 WM_NCACTIVATE = 0x0086
-PATCH_LEN = 14
 CFG_CALL_TARGET_VALID = 0x00000001
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 LRESULT = ctypes.c_ssize_t
-
-
-class MODULEENTRY32W(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", wintypes.DWORD), ("th32ModuleID", wintypes.DWORD),
-        ("th32ProcessID", wintypes.DWORD), ("GlblcntUsage", wintypes.DWORD),
-        ("ProccntUsage", wintypes.DWORD), ("modBaseAddr", ctypes.c_void_p),
-        ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HMODULE),
-        ("szModule", wintypes.WCHAR * 256), ("szExePath", wintypes.WCHAR * 260),
-    ]
 
 
 class GUITHREADINFO(ctypes.Structure):
@@ -84,10 +70,6 @@ class CFG_CALL_TARGET_INFO(ctypes.Structure):
 
 
 def _bind():
-    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel32.Module32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32W)]
-    kernel32.Module32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32W)]
     kernel32.ReadProcessMemory.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.LPVOID,
                                            ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
     kernel32.VirtualProtectEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t,
@@ -178,37 +160,6 @@ def _set_error(msg: str) -> None:
         log(f"ERROR: {msg}")
 
 
-def _remote_module_base(pid: int, module_name: str) -> int | None:
-    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
-    if not snap or snap == wintypes.HANDLE(-1).value:
-        return None
-    try:
-        entry = MODULEENTRY32W()
-        entry.dwSize = ctypes.sizeof(MODULEENTRY32W)
-        if not kernel32.Module32FirstW(snap, ctypes.byref(entry)):
-            return None
-        target = module_name.lower()
-        while True:
-            if entry.szModule.lower() == target:
-                return int(entry.modBaseAddr or 0) or None
-            if not kernel32.Module32NextW(snap, ctypes.byref(entry)):
-                return None
-    finally:
-        kernel32.CloseHandle(snap)
-
-
-def _remote_proc(pid: int, module: str, local_func) -> int | None:
-    local_mod = kernel32.GetModuleHandleW(module)
-    if not local_mod:
-        return None
-    local_addr = ctypes.cast(local_func, ctypes.c_void_p).value
-    local_base = ctypes.cast(local_mod, ctypes.c_void_p).value
-    remote_base = _remote_module_base(pid, module)
-    if not remote_base or local_addr is None or local_base is None:
-        return None
-    return remote_base + (local_addr - local_base)
-
-
 def _read_mem(process, addr: int, size: int) -> bytes | None:
     buf = (ctypes.c_char * size)()
     got = ctypes.c_size_t(0)
@@ -220,13 +171,6 @@ def _read_mem(process, addr: int, size: int) -> bytes | None:
 def _write_mem(process, addr: int, data: bytes) -> bool:
     written = ctypes.c_size_t(0)
     return bool(kernel32.WriteProcessMemory(process, addr, data, len(data), ctypes.byref(written)))
-
-
-def _protect(process, addr: int, size: int, protect: int) -> int | None:
-    old = wintypes.DWORD()
-    if not kernel32.VirtualProtectEx(process, addr, size, protect, ctypes.byref(old)):
-        return None
-    return old.value
 
 
 def _whitelist_cfg(process, region: int, offsets: list[int], region_size: int = 0x1000) -> None:
@@ -348,14 +292,6 @@ def _remote_set_wndproc(
             kernel32.CloseHandle(thread)
     finally:
         kernel32.VirtualFreeEx(process, remote, 0, MEM_RELEASE)
-
-
-def _abs_jmp(target: int) -> bytes:
-    return b"\xFF\x25\x00\x00\x00\x00" + struct.pack("<Q", target & 0xFFFFFFFFFFFFFFFF)
-
-
-def _mov_rax_imm_ret(value: int) -> bytes:
-    return b"\x48\xB8" + struct.pack("<Q", value & 0xFFFFFFFFFFFFFFFF) + b"\xC3"
 
 
 def _class_name(hwnd: int) -> str:
@@ -494,12 +430,6 @@ def build_subclass_wndproc(data_base: int, call_window_proc: int) -> bytes:
 
 
 @dataclass
-class _InlinePatch:
-    addr: int
-    original: bytes
-
-
-@dataclass
 class _Subclass:
     hwnd: int
     remote: int
@@ -511,8 +441,6 @@ class _Subclass:
 class ShieldState:
     hwnd: int
     process: int
-    stub_remote: int
-    patches: list[_InlinePatch] = field(default_factory=list)
     subclasses: list[_Subclass] = field(default_factory=list)
     spoof_focus: int = 0
 
@@ -588,54 +516,6 @@ def _remove_subclass(process, sub: _Subclass) -> None:
         pass
 
 
-def _install_api_hooks(process, pid: int, spoof_fg: int, spoof_focus: int,
-                       stub_base: int) -> list[_InlinePatch] | None:
-    targets = [
-        ("GetForegroundWindow", user32.GetForegroundWindow, spoof_fg, 0x00),
-        ("GetActiveWindow", user32.GetActiveWindow, spoof_fg, 0x10),
-        ("GetFocus", user32.GetFocus, spoof_focus, 0x20),
-    ]
-    patches: list[_InlinePatch] = []
-    for name, local_fn, spoof, offset in targets:
-        remote_fn = _remote_proc(pid, "user32.dll", local_fn)
-        if not remote_fn:
-            log(f"hook {name}: FAIL remote addr ({win_err()})")
-            return None
-        stub = stub_base + offset
-        if not _write_mem(process, stub, _mov_rax_imm_ret(spoof)):
-            log(f"hook {name}: FAIL write stub ({win_err()})")
-            return None
-        original = _read_mem(process, remote_fn, PATCH_LEN)
-        if not original or len(original) < PATCH_LEN:
-            log(f"hook {name}: FAIL read original ({win_err()})")
-            return None
-        old = _protect(process, remote_fn, PATCH_LEN, PAGE_EXECUTE_READWRITE)
-        if old is None:
-            log(f"hook {name}: FAIL VirtualProtectEx ({win_err()}) — browser ACG?")
-            return None
-        ok = _write_mem(process, remote_fn, _abs_jmp(stub))
-        _protect(process, remote_fn, PATCH_LEN, old)
-        if not ok:
-            log(f"hook {name}: FAIL patch ({win_err()})")
-            return None
-        kernel32.FlushInstructionCache(process, remote_fn, PATCH_LEN)
-        log(f"hook {name}: OK remote={remote_fn:#x} spoof={spoof:#x}")
-        patches.append(_InlinePatch(remote_fn, original))
-    return patches
-
-
-def _remove_api_hooks(process, patches: list[_InlinePatch]) -> None:
-    for patch in patches:
-        try:
-            old = _protect(process, patch.addr, len(patch.original), PAGE_EXECUTE_READWRITE)
-            _write_mem(process, patch.addr, patch.original)
-            if old is not None:
-                _protect(process, patch.addr, len(patch.original), old)
-            kernel32.FlushInstructionCache(process, patch.addr, len(patch.original))
-        except Exception:
-            pass
-
-
 def install(hwnd: int) -> ShieldState | None:
     _set_error("")
     log_section(f"focus shield install hwnd={int(hwnd):#x}")
@@ -671,10 +551,8 @@ def install(hwnd: int) -> ShieldState | None:
         _set_error("target is 32-bit; shield needs 64-bit")
         return None
 
-    spoof_fg = int(hwnd)
     spoof_focus = _capture_focus_target(hwnd, thread_id)
-    log(f"spoof_fg={spoof_fg:#x} spoof_focus={spoof_focus:#x} "
-        f"focus_class={_class_name(spoof_focus)!r}")
+    log(f"spoof_focus={spoof_focus:#x} focus_class={_class_name(spoof_focus)!r}")
 
     # Only the top-level Chrome_WidgetWin_1 needs subclassing for WM_ACTIVATE.
     # Subclassing children caused remote-thread AVs and is unnecessary.
@@ -689,54 +567,35 @@ def install(hwnd: int) -> ShieldState | None:
     subclasses.append(sub)
     log(f"subclasses installed={len(subclasses)} root_ok=True")
 
-    # Optional GetFocus / GetForegroundWindow spoof. Brave may refuse this.
-    patches: list[_InlinePatch] = []
-    stub_remote = kernel32.VirtualAllocEx(
-        process, None, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
-    )
-    if stub_remote:
-        stub_remote = int(stub_remote)
-        log(f"api stub page={stub_remote:#x}")
-        _whitelist_cfg(process, stub_remote, [0x00, 0x10, 0x20])
-        hooked = _install_api_hooks(process, pid, spoof_fg, spoof_focus, stub_remote)
-        if hooked:
-            patches = hooked
-            log("api hooks OK")
-        else:
-            log("api hooks FAILED (optional — continuing with subclass only)")
-            kernel32.VirtualFreeEx(process, stub_remote, 0, MEM_RELEASE)
-            stub_remote = 0
-    else:
-        log(f"api stub VirtualAllocEx FAILED ({win_err()}) — continuing subclass only")
-        stub_remote = 0
-
+    # The subclass alone keeps the page present by swallowing its own deactivation.
+    # We deliberately do not patch GetFocus/GetForegroundWindow: those live in the
+    # shared browser process, so spoofing them freezes every other window the user
+    # is trying to work in. The one-shot pulse below only nudges the kept window,
+    # which is the focused one at arm time.
     user32.PostMessageW(hwnd, WM_NCACTIVATE, 1, 0)
     user32.PostMessageW(hwnd, WM_ACTIVATE, 1, 0)
     if spoof_focus != hwnd:
         user32.PostMessageW(spoof_focus, WM_SETFOCUS, 0, 0)
 
-    note = "" if patches else "subclass ok; API hooks blocked by browser mitigations"
-    _set_error(note)
-    log(f"INSTALL SUCCESS subclasses={len(subclasses)} hooks={len(patches)} note={note!r}")
+    _set_error("")
+    log(f"INSTALL SUCCESS subclasses={len(subclasses)}")
     log(f"full log file: {LOG_PATH}")
     return ShieldState(
         hwnd=hwnd,
         process=int(process),
-        stub_remote=int(stub_remote),
-        patches=patches,
         subclasses=subclasses,
         spoof_focus=spoof_focus,
     )
 
 
 def reinforce(state: ShieldState) -> None:
-    """If a deactivate slipped through, push active belief without stealing OS focus."""
+    """Kept window is in the background. Keep its frame painted active, but never
+    push activation or focus while the user works elsewhere. The subclass already
+    keeps the page present, and re-asserting focus here would steal it back from
+    the window the user is actually typing in. Posted, so it never blocks the UI."""
     if not user32.IsWindow(state.hwnd):
         return
-    user32.SendMessageW(state.hwnd, WM_NCACTIVATE, 1, 0)
-    user32.SendMessageW(state.hwnd, WM_ACTIVATE, 1, 0)
-    if state.spoof_focus and user32.IsWindow(state.spoof_focus):
-        user32.SendMessageW(state.spoof_focus, WM_SETFOCUS, 0, 0)
+    user32.PostMessageW(state.hwnd, WM_NCACTIVATE, 1, 0)
 
 
 def resync_real_focus(state: ShieldState) -> None:
@@ -758,16 +617,6 @@ def remove(state: ShieldState) -> None:
         except Exception:
             pass
     try:
-        if state.patches:
-            _remove_api_hooks(state.process, state.patches)
-    except Exception:
-        pass
-    try:
-        if state.stub_remote:
-            kernel32.VirtualFreeEx(state.process, state.stub_remote, 0, MEM_RELEASE)
-    except Exception:
-        pass
-    try:
         kernel32.CloseHandle(state.process)
     except Exception:
         pass
@@ -780,11 +629,6 @@ def is_alive(state: ShieldState) -> bool:
     # so we only check that the root window and our recorded subclass still exist.
     for sub in state.subclasses:
         if sub.hwnd == state.hwnd and user32.IsWindow(sub.hwnd):
-            if state.patches:
-                cur = _read_mem(state.process, state.patches[0].addr, 2)
-                # Hooks may be wiped by the browser; subclass alone still counts.
-                if not (cur and cur.startswith(b"\xFF\x25")):
-                    state.patches.clear()
             return True
     return False
 
